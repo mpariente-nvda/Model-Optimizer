@@ -435,6 +435,17 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
     quantization_format = get_quantization_format(model)
     model_type = type(model).__name__.lower()
     module_names = set()
+    is_vl_model = is_multimodal_model(model)
+    language_model_lineage = get_language_model_from_vl(model) if is_vl_model else None
+
+    # A vision-only FP8 recipe has no decoder work for the probe below. Joint FP8
+    # recipes must still run it to unify fused decoder QKV/gate-up input amax values.
+    if (
+        language_model_lineage is not None
+        and quantization_format in {QUANTIZATION_FP8, QUANTIZATION_FP8_PB_REAL}
+        and not has_quantized_modules(language_model_lineage[-1])
+    ):
+        return
 
     # NVFP4 SVDQuant does not need pre-quant scale fusion (either into previous linear or layernorm) because
     # 1) its kernel handles pre-quant scale.
@@ -464,9 +475,6 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
         fake_input = torch.ones([1, 2], dtype=torch.long).to(model.device)
         decoder_fake_input = fake_input
 
-        # Check if this is a VL model that needs special input handling
-        is_vl_model = is_multimodal_model(model)
-
         if model_type.startswith("whisper"):
             # For Whisper models, we need to pass a fake input with the specific sequence length
             from transformers import AutoFeatureExtractor
@@ -479,8 +487,6 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
         if is_vl_model and "nemotron" in model_type:
             # For Nemotron VL models, run optimization on just the language model/decoder.
             # This avoids needing pixel_values for the vision encoder.
-            language_model_lineage = get_language_model_from_vl(model)
-
             if language_model_lineage is not None:
                 language_model = language_model_lineage[-1]
                 print(

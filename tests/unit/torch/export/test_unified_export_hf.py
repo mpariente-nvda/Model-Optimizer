@@ -23,7 +23,9 @@ from _test_utils.torch.quantization.tied_modules import (
     wrap_in_parent_with_tied_keys,
 )
 
+import modelopt.torch.export.unified_export_hf as unified_export_hf
 import modelopt.torch.quantization as mtq
+from modelopt.recipe import load_recipe
 from modelopt.torch.export.model_utils import (
     _collect_canonical_tied_patterns,
     _reorder_canonical_first,
@@ -31,6 +33,87 @@ from modelopt.torch.export.model_utils import (
 from modelopt.torch.export.quant_utils import fuse_prequant_layernorm, sync_tied_input_amax
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.nn import TensorQuantizer
+
+
+class _NemotronDecoder(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.embed = torch.nn.Embedding(8, 4)
+        self.proj = torch.nn.Linear(4, 4, bias=False)
+        self.forward_called = False
+
+    def forward(self, input_ids, **kwargs):
+        self.forward_called = True
+        return self.proj(self.embed(input_ids))
+
+
+class _NemotronVisionOnlyModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = type("Config", (), {"is_encoder_decoder": False})()
+        self.vision_model = torch.nn.Linear(4, 4, bias=False)
+        self.language_model = _NemotronDecoder()
+
+    @property
+    def device(self):
+        return self.vision_model.weight.device
+
+
+class _NemotronWithoutRecognizedDecoder(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = type("Config", (), {"is_encoder_decoder": False, "vision_config": object()})()
+
+
+def test_unquantized_nemotron_without_recognized_decoder_remains_a_noop():
+    unified_export_hf.requantize_resmooth_fused_llm_layers(_NemotronWithoutRecognizedDecoder())
+
+
+def test_nemotron_vision_only_export_skips_language_model_forward():
+    model = _NemotronVisionOnlyModel()
+    config = load_recipe("huggingface/nemotron_vl/ptq/fp8_vision-kv_none").quantize.model_dump()
+    mtq.quantize(model, config, forward_loop=None)
+
+    unified_export_hf.requantize_resmooth_fused_llm_layers(model)
+    assert not model.language_model.forward_called
+
+
+def test_nemotron_joint_fp8_export_runs_language_model_forward():
+    model = _NemotronVisionOnlyModel()
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward_loop=None)
+
+    unified_export_hf.requantize_resmooth_fused_llm_layers(model)
+    assert model.language_model.forward_called
+
+
+class _Fp8LanguageModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = type("Config", (), {"is_encoder_decoder": False})()
+        self.embed = torch.nn.Embedding(8, 4)
+        self.proj = torch.nn.Linear(4, 4, bias=False)
+        self.forward_called = False
+
+    @property
+    def device(self):
+        return self.proj.weight.device
+
+    def forward(self, input_ids, **kwargs):
+        self.forward_called = True
+        return self.proj(self.embed(input_ids))
+
+
+def test_fp8_llm_export_still_runs_probe_forward():
+    """Skipping the probe forward is only ever valid for multimodal models.
+
+    For a plain LLM the probe forward is what populates `input_to_linear`, and
+    therefore what unifies the amax values of fused QKV / gate-up groups.
+    """
+    model = _Fp8LanguageModel()
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward_loop=None)
+
+    unified_export_hf.requantize_resmooth_fused_llm_layers(model)
+    assert model.forward_called
 
 
 def test_collect_canonical_tied_patterns_dict_style():

@@ -49,6 +49,7 @@ from example_utils import (
     setup_distributed_args,
     validate_fsdp2_supported,
 )
+from nemotron_vl_calib import materialize_radio_summary_idxs
 from torch.utils.data import DataLoader
 from transformers import (
     AutoConfig,
@@ -621,6 +622,12 @@ def load_model(args: argparse.Namespace):
     default_pad_token = None
 
     is_nemotron_vl_model = is_nemotron_vl(full_model)
+
+    if is_nemotron_vl_model:
+        # Some low-memory Transformers loading paths leave C-RADIO's derived
+        # summary-token buffer missing, on meta, or uninitialized. Repair it once
+        # before preview generation or calibration can execute the vision tower.
+        materialize_radio_summary_idxs(full_model)
 
     # Default to image-text calibration for VLM models. Skip for either AutoQuantize path (recipe or
     # the deprecated --auto_quantize_bits CLI), whose text-only path does not support image-text

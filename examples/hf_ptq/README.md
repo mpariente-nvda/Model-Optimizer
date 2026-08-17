@@ -123,7 +123,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 | Qwen2, 2.5-VL (VLM)<sup>11</sup> | ✅ | ✅<sup>12</sup> | ✅ | ✅ | ✅ |
 | Qwen3-VL, Qwen3.5 (VLM)<sup>11,14</sup> | ✅ | - | - | - | - |
 | Gemma 3 (VLM)<sup>11</sup> | ✅ | - | - | - | - |
-| Nemotron VL (VLM)<sup>11,13</sup> | ✅ | - | - | - | ✅ |
+| Nemotron VL (VLM)<sup>11,13,15</sup> | ✅ | - | - | - | ✅ |
 
 > *This is a subset of the models supported. For the full list please check the [TensorRT-LLM support matrix](https://nvidia.github.io/TensorRT-LLM/reference/precision.html#support-matrix)*
 
@@ -141,6 +141,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 > *<sup>12.</sup>For VLMs, `int8_sq` only supports TensorRT-LLM checkpoint export and is not compatible with the TensorRT-LLM torch backend.* \
 > *<sup>13.</sup>Nemotron VL automatically calibrates with image-text pairs; see [VLM calibration with image-text pairs](#vlm-calibration-with-image-text-pairs-eg-nemotron-vl).* \
 > *<sup>14.</sup>Qwen3-VL and dense Qwen3.5 VLM checkpoints support opt-in FP8 vision encoder quantization through model-specific recipes. Vision Linear layers, including primary and deepstack merger Linears where present, are quantized; patch embedding and vision-attention BMMs remain in high precision. MoE variants are not validated by these recipes.*
+> *<sup>15.</sup>Nemotron 3 Nano Omni supports opt-in FP8 C-RADIO vision encoder quantization through the model-specific ``huggingface/nemotron_vl/ptq/fp8_vision-kv_none`` recipe.*
 
 > *The accuracy loss after PTQ may vary depending on the actual model and the quantization method. Different models may have different accuracy loss and usually the accuracy loss is more significant when the base model is small. If the accuracy after PTQ is not meeting the requirement, please try either modifying [hf_ptq.py](./hf_ptq.py) and disabling the KV cache quantization or using the [QAT](./../llm_qat/README.md) instead. For NVFP4 quantization specifically, we recommend `nvfp4_mlp_only`, `nvfp4_experts_only`, or `nvfp4_omlp_only` to achieve higher accuracy by restricting quantization to the MLP/expert layers (and optionally the `o_proj` layer) while keeping the attention QKV projections unquantized.*
 
@@ -273,8 +274,8 @@ Supported `--quant` values for VLMs are `fp8`, `nvfp4`, `int8_sq`, `int4_awq`, a
 the `(VLM)` rows in the [Support Matrix](#hugging-face-supported-models)).
 
 By default, `hf_ptq.py` applies `--qformat` only to the language model. Model-specific recipes
-add FP8 quantization of the vision branch for validated Qwen3-VL and dense Qwen3.5 checkpoints.
-Use the recipe directory matching the checkpoint's `model_type`: `qwen3_vl` or `qwen3_5`.
+add opt-in FP8 quantization of validated vision branches: `qwen3_vl` / `qwen3_5` for Qwen, and
+`nemotron_vl` for Nemotron 3 Nano Omni.
 
 ```bash
 # Vision encoder only: FP8 vision Linears and merger, BF16 LLM and KV cache.
@@ -311,6 +312,25 @@ Use the direct `hf_ptq.py` commands above for these recipes; the generic multimo
 not a serving validation for a vision-quantized checkpoint. Both examples pass `--skip_generate`
 because the script's text-only preview does not forward the image tensors used during calibration.
 For a Qwen3.5 checkpoint, replace `qwen3_vl` with `qwen3_5` in the recipe path.
+
+Nemotron 3 Nano Omni uses the same image-text calibration entry point with its
+C-RADIO-specific vision recipe:
+
+```bash
+python hf_ptq.py \
+  --pyt_ckpt_path <Nemotron-3-Nano-Omni-checkpoint> \
+  --recipe huggingface/nemotron_vl/ptq/fp8_vision-kv_none \
+  --calib_with_images \
+  --calib_size 512 \
+  --skip_generate \
+  --trust_remote_code \
+  --export_path <quantized-checkpoint>
+```
+
+This recipe quantizes the C-RADIO Vision Encoder and vision-projector Linears only. The language
+model, audio branch, KV cache, patch generator, and vision-attention operands remain in high
+precision. Serving requires a runtime that propagates the checkpoint quantization configuration
+to the C-RADIO tower and supports quantized vision-projector Linears.
 
 > *This consolidates the former `examples/vlm_ptq` example, which now forwards here.*
 

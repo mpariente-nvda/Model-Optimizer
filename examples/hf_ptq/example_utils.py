@@ -35,6 +35,7 @@ import transformers
 import yaml
 from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
+from nemotron_vl_calib import resolve_nemotron_calibration_scope, safe_nemotron_vl_forward
 from safetensors import safe_open
 from transformers import (
     AutoConfig,
@@ -227,10 +228,18 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
     Returns:
         A calibration function that can be passed to mtq.quantize()
     """
-    # Import here to avoid circular dependency
-    from nemotron_vl_calib import safe_nemotron_vl_forward
+    calibrate_nemotron_language_model = None
 
     def calibrate_loop(_model):
+        nonlocal calibrate_nemotron_language_model
+        # Resolve once while the recipe quantizers are enabled, then cache. Algorithms
+        # such as GPTQ may temporarily disable them during later forward passes.
+        if (
+            hasattr(full_model, "img_context_token_id")
+            and calibrate_nemotron_language_model is None
+        ):
+            calibrate_nemotron_language_model = resolve_nemotron_calibration_scope(full_model)
+
         # Inspect model's forward signature to determine what parameters it accepts
         forward_params = inspect.signature(full_model.forward).parameters
         accepts_kwargs = any(
@@ -263,7 +272,11 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
                 # Use safe_nemotron_vl_forward for Nemotron Nano VL (embedding-injection style)
                 # For other VLMs (like Nemotron-Parse), use standard forward
                 if hasattr(full_model, "img_context_token_id"):
-                    safe_nemotron_vl_forward(full_model, call_kwargs)
+                    safe_nemotron_vl_forward(
+                        full_model,
+                        call_kwargs,
+                        calibrate_language_model=calibrate_nemotron_language_model,
+                    )
                 else:
                     full_model(**call_kwargs)
 
